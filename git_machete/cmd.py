@@ -68,6 +68,10 @@ def flat_map(func, l):
     return sum(map(func, l), [])
 
 
+def map_non_null(func, l):
+    return list(filter(None, map(func, l)))
+
+
 def non_empty_lines(s):
     return list(filter(None, s.split("\n")))
 
@@ -90,8 +94,11 @@ def safe_input(msg):
     return input(msg)  # Python 3
 
 
-def ask_if(msg):
-    return safe_input(msg).lower() in ('y', 'yes')
+def ask_if(msg, opt_yes_msg):
+    if opt_yes:
+        print(opt_yes_msg)
+        return 'y'
+    return safe_input(msg).lower()
 
 
 def pick(choices, name):
@@ -304,7 +311,7 @@ def prev_branch(b):
 def root_branch(b, accept_self):
     if b not in managed_branches:
         if roots:
-            sys.stderr.write("warn: %s is not a managed branch, assuming %s (the first root) instead as root\n" % (b, roots[0]))
+            sys.stderr.write("Warn: %s is not a managed branch, assuming %s (the first root) instead as root\n" % (b, roots[0]))
             return roots[0]
         else:
             raise_no_branches_error()
@@ -317,7 +324,7 @@ def root_branch(b, accept_self):
     return b
 
 
-def up(b, prompt_if_inferred):
+def up(b, prompt_if_inferred_msg, prompt_if_inferred_yes_opt_msg):
     if b in managed_branches:
         u = up_branch.get(b)
         if u:
@@ -327,8 +334,8 @@ def up(b, prompt_if_inferred):
     else:
         u = infer_upstream(b)
         if u:
-            if prompt_if_inferred:
-                if ask_if(prompt_if_inferred % (b, u)):
+            if prompt_if_inferred_msg:
+                if ask_if(prompt_if_inferred_msg % (b, u), prompt_if_inferred_yes_opt_msg % (b, u)) in ('y', 'yes'):
                     return u
                 else:
                     sys.exit(1)
@@ -352,7 +359,8 @@ def add(b):
     if b not in local_branches():
         out_of = ("'" + onto + "'") if onto else "the current HEAD"
         msg = "A local branch '%s' does not exist. Create (out of %s)? [y/N] " % (b, out_of)
-        if ask_if(msg):
+        opt_yes_msg = "A local branch '%s' does not exist. Creating out of %s" % (b, out_of)
+        if ask_if(msg, opt_yes_msg) in ('y', 'yes'):
             if roots and not onto:
                 cb = current_branch_or_none()
                 if cb and cb in managed_branches:
@@ -375,7 +383,8 @@ def add(b):
                                        "Specify other upstream branch with '--onto' or edit the definition file manually with 'git machete edit'" % (b, u, u))
             else:
                 msg = "Add '%s' onto the inferred upstream (parent) branch '%s'? [y/N] " % (b, u)
-                if ask_if(msg):
+                opt_yes_msg = "Adding '%s' onto the inferred upstream (parent) branch '%s'" % (b, u)
+                if ask_if(msg, opt_yes_msg) in ('y', 'yes'):
                     onto = u
                 else:
                     return
@@ -504,6 +513,32 @@ def remotes():
     if remotes_cached is None:
         remotes_cached = non_empty_lines(popen_git("remote"))
     return remotes_cached
+
+
+fetch_done = False
+
+
+def fetch_remote(remote):
+    global fetch_done
+    if not fetch_done:
+        run_git("fetch", remote)
+        fetch_done = True
+
+
+def set_upstream_to(rb):
+    run_git("branch", "--set-upstream-to", rb)
+
+
+def push(remote, b, force_with_lease=False, set_upstream=False):
+    opt_force_with_lease = ["--force-with-lease"] if force_with_lease else []
+    opt_set_upstream = ["--set-upstream"] if set_upstream else []
+    args = [remote, b]
+    run_git("push", *(opt_force_with_lease + opt_set_upstream + args))
+
+
+def pull_ff_only(remote, b):
+    fetch_remote(remote)
+    run_git("merge", "--ff-only", b + "@{upstream}")
 
 
 def remote_for_branch(b):
@@ -702,7 +737,10 @@ def check_hook_executable(hook_path):
 
 def rebase(onto, fork_commit, branch):
     def do_rebase():
-        run_git("rebase", "--interactive", "--onto", onto, fork_commit, branch)
+        if opt_no_interactive:
+            run_git("rebase", "--onto", onto, fork_commit, branch)
+        else:
+            run_git("rebase", "--interactive", "--onto", onto, fork_commit, branch)
 
     hook_path = get_hook_path("machete-pre-rebase")
     if check_hook_executable(hook_path):
@@ -718,7 +756,10 @@ def rebase(onto, fork_commit, branch):
 
 
 def update(branch, fork_commit):
-    rebase("refs/heads/" + up(branch, prompt_if_inferred="Branch '%s' not found in the tree of branch dependencies; rebase onto the inferred upstream '%s'? [y/N] "), fork_commit, branch)
+    onto = up(branch,
+              prompt_if_inferred_msg="Branch '%s' not found in the tree of branch dependencies. Rebase onto the inferred upstream '%s'? [y/N] ",
+              prompt_if_inferred_yes_opt_msg="Branch '%s' not found in the tree of branch dependencies. Rebasing onto the inferred upstream '%s'...")
+    rebase("refs/heads/" + onto, fork_commit, branch)
 
 
 def reapply(branch, fork_commit):
@@ -1000,7 +1041,7 @@ def discover_tree():
 
     print(bold('Discovered tree of branch dependencies:\n'))
     status()
-    sys.stdout.write("\n")
+    print("")
     do_backup = os.path.exists(definition_file)
     backup_msg = ("The existing definition file will be backed up as '%s~' " % definition_file) if do_backup else ""
     msg = "Save the above tree to '%s'? %s([y]es/[e]dit/[N]o) " % (definition_file, backup_msg)
@@ -1071,10 +1112,10 @@ def delete_unmanaged():
         for b in branches_to_delete_merged_to_head:
             rb = remote_tracking_branch(b)
             is_merged_to_remote = is_ancestor(b, rb, later_prefix="refs/remotes/") if rb else True
-            msg = "Delete branch %s (merged to HEAD%s)? [y/N/q] " % (
-                bold(b), "" if is_merged_to_remote else (", but not merged to " + rb)
-            )
-            ans = safe_input(msg).lower()
+            msg_core = "%s (merged to HEAD%s)" % (bold(b), "" if is_merged_to_remote else (", but not merged to " + rb))
+            msg = "Delete branch %s? [y/N/q] " % msg_core
+            opt_yes_msg = "Deleting branch %s" % msg_core
+            ans = ask_if(msg, opt_yes_msg)
             if ans in ('y', 'yes'):
                 run_git("branch", "-d" if is_merged_to_remote else "-D", b)
             elif ans in ('q', 'quit'):
@@ -1082,14 +1123,16 @@ def delete_unmanaged():
 
         branches_to_delete_unmerged_to_head = [b for b in branches_to_delete if b not in branches_merged_to_head]
         for b in branches_to_delete_unmerged_to_head:
-            msg = "Delete branch %s (unmerged to HEAD)? [y/N/q] " % bold(b)
-            ans = safe_input(msg).lower()
+            msg_core = "%s (unmerged to HEAD)" % bold(b)
+            msg = "Delete branch %s? [y/N/q] " % msg_core
+            opt_yes_msg = "Deleting branch %s" % msg_core
+            ans = ask_if(msg, opt_yes_msg)
             if ans in ('y', 'yes'):
                 run_git("branch", "-D", b)
             elif ans in ('q', 'quit'):
                 return
     else:
-        sys.stderr.write("No branches to delete\n")
+        print("No branches to delete")
 
 
 def slide_out(bs):
@@ -1158,10 +1201,10 @@ def flush():
 def pick_remote(b):
     rems = remotes()
     print("\n".join("[%i] %s" % (idx + 1, r) for idx, r in enumerate(rems)))
-    msg_ = "Select number 1..%i to specify the destination remote " \
-           "repository, or 'n' to skip this branch, or " \
-           "'q' to quit the traverse: " % len(rems)
-    ans = safe_input(msg_).lower()
+    msg = "Select number 1..%i to specify the destination remote " \
+          "repository, or 'n' to skip this branch, or " \
+          "'q' to quit the traverse: " % len(rems)
+    ans = safe_input(msg).lower()
     if ans in ('q', 'quit'):
         raise StopTraversal
     try:
@@ -1179,16 +1222,16 @@ def handle_untracked_branch(new_remote, b):
     other_remote_suffix = "/[o]ther remote" if can_pick_other_remote else ""
     rb = new_remote + "/" + b
     if not sha_by_revision(rb, prefix="refs/remotes"):
-        ans = safe_input("Push untracked branch %s to %s? (y/N/q/yq%s) " % (
-            bold(b), bold(new_remote), other_remote_suffix)).lower()
-        if ans in ('y', 'yes', 'yq'):
-            run_git("push", "--set-upstream", new_remote, b)
-            if ans == 'yq':
+        msg = "Push untracked branch %s to %s? (y/N/q/yq%s) " % (bold(b), bold(new_remote), other_remote_suffix)
+        opt_yes_msg = "Pushing untracked branch %s to %s..." % (bold(b), bold(new_remote))
+        if ask_if(msg, opt_yes_msg) in ('y', 'yes', 'yq'):
+            push(new_remote, b, set_upstream=True)
+            if msg == 'yq':
                 raise StopTraversal
             flush()
-        elif can_pick_other_remote and ans in ('o', 'other'):
+        elif can_pick_other_remote and msg in ('o', 'other'):
             pick_remote(b)
-        elif ans in ('q', 'quit'):
+        elif msg in ('q', 'quit'):
             raise StopTraversal
         return
 
@@ -1212,52 +1255,46 @@ def handle_untracked_branch(new_remote, b):
     }
 
     prompt = {
-        IN_SYNC_WITH_REMOTE:
-            "Set the remote of %s to %s without pushing or "
-            "pulling? (y/N/q/yq%s) " %
-            (bold(b), bold(new_remote), other_remote_suffix),
-        BEHIND_REMOTE:
-            "Pull %s from %s? (y/N/q/yq%s) " %
-            (bold(b), bold(new_remote), other_remote_suffix),
-        AHEAD_OF_REMOTE:
-            "Push branch %s to %s? (y/N/q/yq%s) " %
-            (bold(b), bold(new_remote), other_remote_suffix),
-        DIVERGED_FROM_REMOTE:
-            "Push branch %s with force-with-lease to %s? (y/N/q/yq%s) " %
-            (bold(b), bold(new_remote), other_remote_suffix)
+        IN_SYNC_WITH_REMOTE: (
+            "Set the remote of %s to %s without pushing or pulling? (y/N/q/yq%s) " % (bold(b), bold(new_remote), other_remote_suffix),
+            "Setting the remote of %s to %s" % (bold(b), bold(new_remote))
+        ),
+        BEHIND_REMOTE: (
+            "Pull %s from %s? (y/N/q/yq%s) " % (bold(b), bold(new_remote), other_remote_suffix),
+            "Pulling %s from %s..." % (bold(b), bold(new_remote))
+        ),
+        AHEAD_OF_REMOTE: (
+            "Push branch %s to %s? (y/N/q/yq%s) " % (bold(b), bold(new_remote), other_remote_suffix),
+            "Pushing branch %s to %s..." % (bold(b), bold(new_remote))
+        ),
+        DIVERGED_FROM_REMOTE: (
+            "Push branch %s with force-with-lease to %s? (y/N/q/yq%s) " % (bold(b), bold(new_remote), other_remote_suffix),
+            "Pushing branch %s with force-with-lease to %s..." % (bold(b), bold(new_remote))
+        )
     }
 
-    yes_git_commands = {
-        IN_SYNC_WITH_REMOTE: [
-            ["branch", "--set-upstream-to", rb]
-        ],
-        BEHIND_REMOTE: [
-            ["pull", "--ff-only", new_remote, b],
-            # There's apparently no way to set remote automatically when doing
-            # 'git pull' (as opposed to 'git push'),
-            # so a separate 'git branch --set-upstream-to' is needed.
-            ["branch", "--set-upstream-to", rb]
-        ],
-        AHEAD_OF_REMOTE: [
-            ["push", "--set-upstream", new_remote, b]
-        ],
-        DIVERGED_FROM_REMOTE: [
-            ["push", "--set-upstream", "--force-with-lease", new_remote, b]
-        ]
+    yes_actions = {
+        IN_SYNC_WITH_REMOTE: lambda: set_upstream_to(rb),
+        # There's apparently no way to set remote automatically when doing
+        # 'git pull' (as opposed to 'git push'),
+        # so a separate 'git branch --set-upstream-to' is needed.
+        BEHIND_REMOTE: lambda: (pull_ff_only(new_remote, b), set_upstream_to(rb)),
+        AHEAD_OF_REMOTE: lambda: push(new_remote, b, set_upstream=True),
+        DIVERGED_FROM_REMOTE: lambda: push(new_remote, b, force_with_lease=True, set_upstream=True)
     }
 
     relation = get_relation_to_remote_counterpart(b, rb)
     print(message[relation])
-    ans = safe_input(prompt[relation]).lower()
-    if ans in ('y', 'yes', 'yq'):
-        for command in yes_git_commands[relation]:
-            run_git(*command)
-        if ans == 'yq':
+    msg, opt_yes_msg = prompt[relation]
+    msg = ask_if(msg, opt_yes_msg)
+    if msg in ('y', 'yes', 'yq'):
+        yes_actions[relation]()
+        if msg == 'yq':
             raise StopTraversal
         flush()
-    elif can_pick_other_remote and ans in ('o', 'other'):
+    elif can_pick_other_remote and msg in ('o', 'other'):
         pick_remote(b)
-    elif ans in ('q', 'quit'):
+    elif msg in ('q', 'quit'):
         raise StopTraversal
 
 
@@ -1269,11 +1306,26 @@ def traverse():
     def print_new_line(new_status):
         global empty_line_status
         if not empty_line_status:
-            sys.stdout.write("\n")
+            print("")
         empty_line_status = new_status
 
-    cb = current_branch()
-    expect_in_managed_branches(cb)
+    if opt_fetch:
+        relevant_remotes = set(map_non_null(remote_for_branch, managed_branches))
+        for r in relevant_remotes:
+            print("Fetching %s" % r)
+            fetch_remote(r)
+        if relevant_remotes:
+            flush()
+            print("")
+
+    initial_branch = return_to_branch = current_branch()
+    if opt_from_first_root:
+        dest = managed_branches[0]
+        go(dest)
+        cb = dest
+    else:
+        cb = current_branch()
+        expect_in_managed_branches(cb)
 
     for b in itertools.dropwhile(lambda x: x != cb, managed_branches):
         u = up_branch.get(b)
@@ -1296,7 +1348,7 @@ def traverse():
 
         if b != cb and (needs_slide_out or needs_rebase or needs_remote_sync):
             print_new_line(False)
-            sys.stderr.write("Checking out %s\n" % bold(b))
+            print("Checking out %s" % bold(b))
             go(b)
             cb = b
             print_new_line(False)
@@ -1304,10 +1356,16 @@ def traverse():
             print_new_line(True)
         if needs_slide_out:
             print_new_line(False)
-            ans = safe_input("Branch %s is merged into %s. Slide %s out of "
-                             "the tree of branch dependencies? [y/N/q/yq] " %
-                             (bold(b), bold(u), bold(b))).lower()
+            ans = ask_if(
+                "Branch %s is merged into %s. Slide %s out of the tree of branch dependencies? [y/N/q/yq] " % (bold(b), bold(u), bold(b)),
+                "Branch %s is merged into %s. Sliding %s out of the tree of branch dependencies" % (bold(b), bold(u), bold(b))
+            )
             if ans in ('y', 'yes', 'yq'):
+                if return_to_branch == b:
+                    if down_branches.get(b):
+                        return_to_branch = down_branches[b][0]
+                    else:
+                        return_to_branch = u
                 for d in down_branches.get(b) or []:
                     up_branch[d] = u
                 down_branches[u] = flat_map(
@@ -1319,18 +1377,17 @@ def traverse():
                 save_definition_file()
                 if ans == 'yq':
                     return
-                # No need to flush caches since nothing changed in commit/branch
-                # structure (only machete-specific changes happened).
-                continue  # No need to sync branch 'b' with remote
-                # since it just got removed from the tree of dependencies.
+                # No need to flush caches since nothing changed in commit/branch structure (only machete-specific changes happened).
+                continue  # No need to sync branch 'b' with remote since it just got removed from the tree of dependencies.
             elif ans in ('q', 'quit'):
                 return
-            # If user answered 'no', we don't try to rebase
-            # but still suggest to sync with remote (if needed).
+            # If user answered 'no', we don't try to rebase but still suggest to sync with remote (if needed).
         elif needs_rebase:
             print_new_line(False)
-            ans = safe_input("Rebase %s onto %s? [y/N/q/yq] " %
-                             (bold(b), bold(u))).lower()
+            ans = ask_if(
+                "Rebase %s onto %s? [y/N/q/yq] " % (bold(b), bold(u)),
+                "Rebasing %s onto %s..." % (bold(b), bold(u))
+            )
             if ans in ('y', 'yes', 'yq'):
                 update(b, fork_point(b))
                 if ans == 'yq':
@@ -1344,26 +1401,28 @@ def traverse():
         if needs_remote_sync:
             if s == BEHIND_REMOTE:
                 rb = remote_tracking_branch(b)
-                ans = safe_input("Branch %s is behind its remote counterpart %s."
-                                 "\nPull %s from %s? [y/N/q/yq] " %
-                                 (bold(b), bold(rb), bold(b), bold(remote))).lower()
+                ans = ask_if(
+                    "Branch %s is behind its remote counterpart %s.\nPull %s from %s? [y/N/q/yq] " % (bold(b), bold(rb), bold(b), bold(remote)),
+                    "Branch %s is behind its remote counterpart %s. Pulling %s from %s..." % (bold(b), bold(rb), bold(b), bold(remote))
+                )
                 if ans in ('y', 'yes', 'yq'):
-                    run_git("pull", "--ff-only", remote)
+                    pull_ff_only(remote, b)
                     if ans == 'yq':
                         return
                     flush()
-                    sys.stdout.write("\n")
+                    print("")
                 elif ans in ('q', 'quit'):
                     return
 
             elif s == UNTRACKED_ON or s == AHEAD_OF_REMOTE:
                 print_new_line(False)
-                # 'remote' is defined for both cases we handle here,
-                # including UNTRACKED_ON
-                ans = safe_input("Push %s to %s? [y/N/q/yq] " %
-                                 (bold(b), bold(remote))).lower()
+                # 'remote' is defined for both cases we handle here, including UNTRACKED_ON
+                ans = ask_if(
+                    "Push %s to %s? [y/N/q/yq] " % (bold(b), bold(remote)),
+                    "Pushing %s to %s..." % (bold(b), bold(remote))
+                )
                 if ans in ('y', 'yes', 'yq'):
-                    run_git("push", remote)
+                    push(remote, b)
                     if ans == 'yq':
                         return
                     flush()
@@ -1373,12 +1432,12 @@ def traverse():
             elif s == DIVERGED_FROM_REMOTE:
                 print_new_line(False)
                 rb = remote_tracking_branch(b)
-                ans = safe_input(
-                    "Branch %s diverged from its remote counterpart %s."
-                    "\nPush %s with force-with-lease to %s? [y/N/q/yq] " %
-                    (bold(b), bold(rb), bold(b), bold(remote))).lower()
+                ans = ask_if(
+                    "Branch %s diverged from its remote counterpart %s. \nPush %s with force-with-lease to %s? [y/N/q/yq] " % (bold(b), bold(rb), bold(b), bold(remote)),
+                    "Branch %s diverged from its remote counterpart %s. Pushing %s with force-with-lease to %s..." % (bold(b), bold(rb), bold(b), bold(remote))
+                )
                 if ans in ('y', 'yes', 'yq'):
-                    run_git("push", "--force-with-lease", remote)
+                    push(remote, b, force_with_lease=True)
                     if ans == 'yq':
                         return
                     flush()
@@ -1395,17 +1454,25 @@ def traverse():
                 else:
                     # We know that there is at least 1 remote,
                     # otherwise 's' would be 'NO_REMOTES'
-                    print("Branch %s is untracked and there's no "
-                          "%s repository." % (bold(b), bold("origin")))
+                    print("Branch %s is untracked and there's no %s repository." % (bold(b), bold("origin")))
                     pick_remote(b)
+
+    if opt_return:
+        go(return_to_branch)
 
     print_new_line(False)
     status()
-    sys.stdout.write("\n")
+    print("")
     msg = "Reached branch %s which has no successor" \
         if cb == managed_branches[-1] else \
         "No successor of %s needs sync with upstream branch or remote"
-    sys.stderr.write(msg % bold(cb) + "; nothing left to update\n")
+    print(msg % bold(cb) + "; nothing left to update")
+
+    if opt_return:
+        if return_to_branch == initial_branch:
+            print("Returned to the initial branch %s" % bold(initial_branch))
+        else:
+            print("The initial branch %s has been slid out. Returning to nearest remaining managed branch %s" % (bold(initial_branch), bold(return_to_branch)))
 
 
 def status():
@@ -1914,11 +1981,11 @@ def usage(c=None):
         )
         for hdr, cmds in groups:
             print(underline(hdr))
-            sys.stdout.write("\n")
+            print("")
             for cm in cmds:
                 alias = (", " + aliases[cm]) if cm in aliases else ""
                 print("    %s%-18s%s%s" % (BOLD, cm + alias, ENDC, short_docs[cm]))
-            sys.stderr.write("\n")
+            sys.stdout.write("\n")
         print(textwrap.dedent("""
             %s\n
                 --debug           Log detailed diagnostic info, including outputs of the executed git commands.
@@ -1938,13 +2005,18 @@ def version():
 
 def main():
     def parse_options(in_args, short_opts="", long_opts=[], gnu=True):
-        global opt_checked_out_since, opt_color, opt_debug, opt_down_fork_point, opt_fork_point, opt_list_commits, opt_onto, opt_roots, opt_stat, opt_verbose
+        global opt_checked_out_since, opt_color, opt_debug, opt_down_fork_point, opt_fetch, opt_fork_point, opt_from_first_root
+        global opt_list_commits, opt_no_interactive, opt_onto, opt_return, opt_roots, opt_stat, opt_verbose, opt_yes
 
         fun = getopt.gnu_getopt if gnu else getopt.getopt
         opts, rest = fun(in_args, short_opts + "hv", long_opts + ['debug', 'help', 'verbose', 'version'])
 
         for opt, arg in opts:
-            if opt == "--color":
+            if opt == "-a":
+                opt_from_first_root = opt_no_interactive = opt_return = True
+            elif opt in ("-A", "--auto"):
+                opt_fetch = opt_from_first_root = opt_no_interactive = opt_return = True
+            elif opt == "--color":
                 opt_color = arg
             elif opt in ("-C", "--checked-out-since"):
                 opt_checked_out_since = arg
@@ -1954,15 +2026,23 @@ def main():
                 opt_debug = True
             elif opt in ("-f", "--fork-point"):
                 opt_fork_point = arg
+            elif opt == "--fetch":
+                opt_fetch = True
+            elif opt == "--from-first-root":
+                opt_from_first_root = True
             elif opt in ("-h", "--help"):
                 usage(cmd)
                 sys.exit()
             elif opt in ("-l", "--list-commits"):
                 opt_list_commits = True
+            elif opt == "--no-interactive":
+                opt_no_interactive = True
             elif opt in ("-o", "--onto"):
                 opt_onto = arg
             elif opt in ("-r", "--roots"):
                 opt_roots = set(arg.split(","))
+            elif opt == "--return":
+                opt_return = True
             elif opt in ("-s", "--stat"):
                 opt_stat = True
             elif opt in ("-v", "--verbose"):
@@ -1970,6 +2050,8 @@ def main():
             elif opt == "--version":
                 version()
                 sys.exit()
+            elif opt in ("-y", "--yes"):
+                opt_yes = True
         return rest
 
     def expect_no_param(in_args, extra_explanation=''):
@@ -1999,19 +2081,24 @@ def main():
             return in_args[0]
 
     global definition_file
-    global opt_checked_out_since, opt_color, opt_debug, opt_down_fork_point, opt_down_fork_point, opt_fork_point, opt_list_commits, opt_onto, opt_roots, opt_stat, opt_verbose
+    global opt_checked_out_since, opt_color, opt_debug, opt_down_fork_point, opt_fetch, opt_fork_point, opt_from_first_root
+    global opt_list_commits, opt_no_interactive, opt_onto, opt_return, opt_roots, opt_stat, opt_verbose, opt_yes
     try:
-        cmd = None
         opt_checked_out_since = None
         opt_color = "auto"
         opt_debug = False
         opt_down_fork_point = None
+        opt_fetch = False
         opt_fork_point = None
+        opt_from_first_root = False
         opt_list_commits = False
+        opt_no_interactive = False
         opt_onto = None
+        opt_return = False
         opt_roots = set()
         opt_stat = False
         opt_verbose = False
+        opt_yes = False
 
         all_args = parse_options(sys.argv[1:], gnu=False)
         if not all_args:
@@ -2041,12 +2128,12 @@ def main():
             elif param in ("r", "root"):
                 return root_branch(b, accept_self=False)
             elif param in ("u", "up"):
-                return up(b, prompt_if_inferred=None)
+                return up(b, prompt_if_inferred_msg=None, prompt_if_inferred_yes_opt_msg=None)
             else:
                 raise MacheteException("Usage: git machete %s %s" % (cmd, directions))
 
         if cmd == "add":
-            param = check_optional_param(parse_options(args, "o:", ["onto="]))
+            param = check_optional_param(parse_options(args, "o:y", ["onto=", "yes"]))
             read_definition_file()
             add(param or current_branch())
         elif cmd == "anno":
@@ -2057,7 +2144,7 @@ def main():
             else:
                 print_annotation()
         elif cmd == "delete-unmanaged":
-            expect_no_param(parse_options(args))
+            expect_no_param(parse_options(args, "y", ["yes"]))
             read_definition_file()
             delete_unmanaged()
         elif cmd in ("d", "diff"):
@@ -2127,17 +2214,17 @@ def main():
             else:
                 raise MacheteException("Usage: git machete list " + list_allowed_values)
             if res:
-                sys.stdout.write("\n".join(res) + "\n")
+                print("\n".join(res))
         elif cmd in ("l", "log"):
             param = check_optional_param(parse_options(args))
             read_definition_file()
             log(param or current_branch())
         elif cmd == "prune-branches":
-            expect_no_param(parse_options(args))
+            expect_no_param(parse_options(args, "y", ["yes"]))
             read_definition_file()
             delete_unmanaged()
         elif cmd == "reapply":
-            args1 = parse_options(args, "f:", ["fork-point="])
+            args1 = parse_options(args, "f:", ["fork-point=", "no-interactive"])
             expect_no_param(args1, ". Use '-f' or '--fork-point' to specify the fork point commit")
             read_definition_file()
             cb = current_branch()
@@ -2147,7 +2234,7 @@ def main():
             read_definition_file()
             print(parse_direction(current_branch(), down_pick_mode=False))
         elif cmd == "slide-out":
-            params = parse_options(args, "d:", ["down-fork-point="])
+            params = parse_options(args, "d:", ["down-fork-point=", "no-interactive"])
             read_definition_file()
             slide_out(params or [current_branch()])
         elif cmd in ("s", "status"):
@@ -2163,11 +2250,12 @@ def main():
             else:
                 raise_no_branches_error()
         elif cmd == "traverse":
-            expect_no_param(parse_options(args, "l", ["list-commits"]))
+            traverse_long_opts = ["auto", "fetch", "from-first-root", "list-commits", "no-interactive", "return", "yes"]
+            expect_no_param(parse_options(args, "Aaly", traverse_long_opts))
             read_definition_file()
             traverse()
         elif cmd == "update":
-            args1 = parse_options(args, "f:", ["fork-point="])
+            args1 = parse_options(args, "f:", ["fork-point=", "no-interactive"])
             expect_no_param(args1, ". Use '-f' or '--fork-point' to specify the fork point commit")
             read_definition_file()
             cb = current_branch()
