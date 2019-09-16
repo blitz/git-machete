@@ -8,14 +8,15 @@ _git_machete() {
     directions="down first last next prev root up"
 
     common_opts="--debug -h --help -v --verbose --version"
-    add_opts="-o --onto="
+    add_opts="-o --onto= --yes"
+    delete_unmanaged_opts="--yes"
     diff_opts="-s --stat"
     discover_opts="-C --checked-out-since= -l --list-commits -r --roots="
-    reapply_opts="-f --fork-point="
-    slide_out_opts="-d --down-fork-point="
+    reapply_opts="-f --fork-point= --no-interactive"
+    slide_out_opts="-d --down-fork-point= --no-interactive"
     status_opts="-l --list-commits --color="
-    traverse_opts="-l --list-commits"
-    update_opts="-f --fork-point="
+    traverse_opts="-A -a --auto --fetch --from-first-root -l --list-commits --no-interactive --return --yes"
+    update_opts="-f --fork-point= --no-interactive"
 
     case "$cur" in
         --checked-out-since=*) __gitcomp "" ;;
@@ -27,6 +28,7 @@ _git_machete() {
             case "${COMP_WORDS[2]}" in
                 add) __gitcomp "$common_opts $add_opts" ;;
                 d|diff) __gitcomp "$common_opts $diff_opts" ;;
+                delete-unmanaged) __gitcomp "$common_opts $delete_unmanaged_opts" ;;
                 discover) __gitcomp "$common_opts $discover_opts" ;;
                 reapply) __gitcomp "$common_opts $reapply_opts" ;;
                 slide-out) __gitcomp "$common_opts $slide_out_opts" ;;
@@ -42,6 +44,7 @@ _git_machete() {
                 prev="${COMP_WORDS[COMP_CWORD-1]}"
                 case "$prev" in
                     -C|--checked-out-since) __gitcomp "" ;;
+                    --color) __gitcomp "$color_modes" ;;
                     -d|--down-fork-point|-f|--fork-point) __gitcomp "$(__git_refs)" ;;
                     # TODO #25: We don't complete --help since it's going to be captured by git anyway
                     # (and results in redirection to yet non-existent man for `git-machete`).

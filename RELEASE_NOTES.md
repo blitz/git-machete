@@ -1,5 +1,14 @@
 # Release notes
 
+## New in git-machete 2.13.0
+
+- added: `--yes` flag to `add`
+- added: `--yes` flag to `delete-unmanaged`
+- added: `--no-interactive` flag to `reapply`
+- added: `--no-interactive` flag to `slide-out`
+- added: `--auto`, `--fetch`, `--no-interactive`, `--return`, `--yes` flags to `traverse`
+- added: `--no-interactive` flag to `update`
+
 ## New in git-machete 2.12.2
 
 - fixed: `discover --checked-out-since` was crashing for branches that weren't referenced anywhere in `git reflog HEAD`
