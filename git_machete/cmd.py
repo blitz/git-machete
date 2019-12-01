@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+from git_machete import __version__
 import distutils.spawn
 import getopt
 import io
@@ -10,8 +11,6 @@ import re
 import subprocess
 import sys
 import textwrap
-
-VERSION = '2.12.2'
 
 
 # Core utils
@@ -1934,7 +1933,7 @@ def short_usage():
 
 
 def version():
-    print('git-machete version ' + VERSION)
+    print('git-machete version ' + __version__)
 
 
 def main():
